@@ -7,68 +7,127 @@ from PIL import Image, ImageDraw, ImageFont
 from concurrent.futures import ThreadPoolExecutor
 
 step = 1 / 30
-time = -1.0
+time_end_frame = -1.0
+inertial_count = 0
+angle_W_a_compensated = 0.0
+angle_W_openloop = 0.0
 frameCounter = 0
 
-count = 0
-sommaG = 0.0
-sommaX = 0.0
-sommaY = 0.0
-sommaZ = 0.0
-averageG = 0.0
-averageX = 0.0
-averageY = 0.0
-averageZ = 0.0
-font = ImageFont.truetype("courbd.ttf", 100)
+font = ImageFont.truetype("courbd.ttf", 46)
 
 executor = ThreadPoolExecutor(max_workers=6)
 
-def time2ts(t):
-    s = t.split(':')
-    return int(s[0])*3600 + int(s[1])*60 + int(s[2]) + int(s[3])/1000
+def drawSwing(draw, x, y, l, angle, aT, alpha):
+    fixedFill = (0xff, 0x4d, 0x00)
+    shaftFill = (0xff, 0xca, 0x00)
+    benchFill = (0x19, 0xbe, 0x17)
+    gFill = (0x00, 0x00, 0xff)
+    benchSize = 8
+    spindleSize = 10
 
-def makeFrame(x, y, z, g, f):
-    angle = math.acos(z / math.sqrt(x*x + y*y + z*z))
-    print(" - frame:", f, " g: ", format(g, '.2f'))
+    xs = x + math.sin(angle) * l * 0.8
+    ys = y + math.cos(angle) * l * 0.8
+    # swing shaft
+    draw.line((x, y, xs, ys), fill=shaftFill, width=5)
+    # aT vector
+    xv = xs + math.sin(alpha) * l / 4 * aT
+    yv = ys + math.cos(alpha) * l / 4 * aT
+    draw.line((xs, ys, xv, yv), fill=gFill, width = 10)
+    draw.ellipse((xv - benchSize, yv - benchSize, xv + benchSize, yv + benchSize), fill=gFill, width = 3)
+    # swing bench
+    draw.ellipse((xs - benchSize, ys - benchSize, xs + benchSize, ys + benchSize), fill=benchFill, width = 3)
+    # fixed post
+    draw.line((x, y, x, y + l), fill=fixedFill, width=12)
+    # spindle
+    draw.ellipse((x - spindleSize, y - spindleSize, x + spindleSize, y + spindleSize), fill=fixedFill)
+    # base
+    draw.rectangle((x - spindleSize, y + l - spindleSize / 2, x + spindleSize, y + l + spindleSize / 2), fill=fixedFill)
+
+def makeImage(aT, alpha, wX, angle1, angle2, framenumber):
+    gT = aT / 9.8
     img = Image.new('RGBA', (1080, 1920), (255, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.text((10,10), format(g, '.2f') + 'g', font=font, stroke_width=12, stroke_fill=(0,0,0))
-    print("angle: " + str(angle) + " X:" + str(math.sin(angle)) + " Y: " + str(math.cos(angle)))
-    draw.line((800, 200, 800+math.sin(angle)*200, 200-math.cos(angle)*200), fill=(0,255,0), width=10)
-    draw.line((800, 200, 800, 400), fill=(0,0,255), width=10)
-    img.save('png/' + format(f, '05d') + '.png', 'PNG')
+    draw.text((10,10), "gT: " + format(gT, '.1f') + 'g α1: ' + format(math.degrees(angle1), '.1f') + '° α2: ' + format(math.degrees(angle2), '.1f') + '° ω: ' + format(wX, '.2f') +'°/s', font=font, stroke_width=5, stroke_fill=(0,0,0))
+    #print("angle: " + str(angle) + " X:" + str(math.sin(angle)) + " Y: " + str(math.cos(angle)))
+    drawSwing(draw, 800, 200, 200, angle1, gT, alpha)
+    #drawSwing(draw, 800, 600, 200, angle2, gT, alpha)
+    img.save('png/' + format(framenumber, '05d') + '.png', 'PNG')
+    print("*** Written frame " + str(framenumber))
+
+def normalize_angle_rad(angle):
+    if(angle > math.pi):
+        return angle - 2 * math.pi
+    elif(angle < -math.pi):
+        return angle + 2 * math.pi
+    return angle
+
 
 with open(sys.argv[1]) as csvfile:
-    reader = csv.reader(csvfile)
-    next(reader)
+    column_names = ["ax", "ay", "az", "wx", "wy", "wz", "ts", "datetime"]
+    reader = csv.DictReader(csvfile, column_names)
+    next(reader) # skipping header
 
     for row in reader:
-        if(time < 0):
-            time = time2ts(row[0]) + step
-            print("Time set: " + str(time))
-        print("Frame: " + str(frameCounter) + " rowTS: " + str(time2ts(row[0])) + " TS: " + str(time))
-        if(time2ts(row[0]) < time):
-            sommaX += float(row[1])
-            sommaY += float(row[2])
-            sommaZ += float(row[3])
-            sommaG += float(row[4])
-            count += 1
-        else:
-            if(count != 0):
-                averageX = sommaX / count
-                averageY = sommaY / count
-                averageZ = sommaZ / count
-                averageG = sommaG / count
-                sommaX = 0.0
-                sommaY = 0.0
-                sommaZ = 0.0
-                sommaG = 0.0
+        # only the first time
+        if(time_end_frame < 0):
+            old_time = float(row['ts']) / 1000
+            time_end_frame = old_time + step
+            aT = 0.0
+            axsum = 0.0
+            aysum = 0.0
+            azsum = 0.0
+            count = 0
+            print("Time set: " + str(time_end_frame))
+
+        # taking care of calculations:
+        # angleW
+        current_time = float(row['ts']) / 1000
+        wX = float(row['wx']) # deg/s
+        dWx = math.radians(wX) * (current_time - old_time)
+        angle_W_openloop -= dWx
+        angle_W_a_compensated -= dWx
+        angle_W_openloop = normalize_angle_rad(angle_W_openloop)
+        angle_W_a_compensated = normalize_angle_rad(angle_W_a_compensated)
+        old_time = current_time
+        # aT
+        ax = float(row['ax'])
+        ay = float(row['ay'])
+        az = float(row['az'])
+        axsum += ax
+        aysum += ay
+        azsum += az
+        count += 1
+
+        print("Frame: " + str(frameCounter) + " current row time: " + format(current_time, '.3f') + " Frame end time: " + format(time_end_frame, '.3f') + " count: " + str(count))
+
+        # if we have passed the times that marks the end of the frame, let's produce one (or more) images
+        while(current_time >= time_end_frame):
+            if(count > 0): # new frame WITH new data - regular case
+                ax = axsum / count
+                ay = aysum / count
+                az = azsum / count
+                aT = math.sqrt(ax**2 + ay**2 + az**2)
+                alpha = math.acos(az / aT)
+                if(ay <= 0):
+                    alpha = -alpha
+                #print("  - aT: " + str(aT) + " aTsum: " + str(aTsum) + " count: " + str(count))
+                if((9.4 <= aT <= 10.2) and (-2.0 <= wX <= 2.0)):
+                    print("alpha: " + format(math.degrees(alpha), '.1f'))
+                    inertial_count += 1
+                    if(inertial_count >= 10):
+                        print("################################################## sync ##################################################")
+                        print("   alpha: " + format(math.degrees(alpha), '.1f') + " old angle: " + format(math.degrees(angle_W_a_compensated), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_a_compensated), '.1f') + " w: " + format(math.degrees(angle_W_openloop), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_openloop), '.1f'))
+                        angle_W_a_compensated = alpha
+                else:
+                    inertial_count = 0
+                axsum = 0.0
+                aysum = 0.0
+                azsum = 0.0
                 count = 0
-            else:
-                print("** ** ** Skipped!")
-
-            makeFrame(averageX, averageY, averageZ, averageG, frameCounter)
-            #executor.submit(makeFrame, averageX, averageY, averageZ, averageG, frameCounter)
+            else: # frame time has passed but there is no data, likely a "hole" in the sensor capture - let's use old data unchanged
+                print("** ** ** FRAME NO DATA!")
+            
+            #makeImage(aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter)
+            executor.submit(makeImage, aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter)
             frameCounter += 1
-            time += step
-
+            time_end_frame += step
