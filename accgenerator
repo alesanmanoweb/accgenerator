@@ -12,18 +12,23 @@ inertial_count = 0
 angle_W_a_compensated = 0.0
 angle_W_openloop = 0.0
 frameCounter = 0
+maxAngleF = 0.0
+maxAngleB = 0.0
+fullTurns = 0
+minAngle = math.pi / 4
 
-font = ImageFont.truetype("courbd.ttf", 46)
+font = ImageFont.truetype("courbd.ttf", 50)
 
 executor = ThreadPoolExecutor(max_workers=6)
 
-def drawSwing(draw, x, y, l, angle, aT, alpha):
+def drawSwing(draw, x, y, l, angle, aT, alpha, maxF, maxB, full):
     fixedFill = (0xff, 0x4d, 0x00)
     shaftFill = (0xff, 0xca, 0x00)
     benchFill = (0x19, 0xbe, 0x17)
     gFill = (0x00, 0x00, 0xff)
     benchSize = 8
     spindleSize = 10
+    maxAngleFill = (0xbe, 0x17, 0xb6)
 
     xs = x + math.sin(angle) * l * 0.8
     ys = y + math.cos(angle) * l * 0.8
@@ -34,6 +39,29 @@ def drawSwing(draw, x, y, l, angle, aT, alpha):
     yv = ys + math.cos(alpha) * l / 4 * aT
     draw.line((xs, ys, xv, yv), fill=gFill, width = 10)
     draw.ellipse((xv - benchSize, yv - benchSize, xv + benchSize, yv + benchSize), fill=gFill, width = 3)
+    # max angles
+    if(full > 0):
+            draw.ellipse((x - l * 0.3, y - l * 0.3, x + l * 0.3, y + l * 0.3, ), outline=maxAngleFill, width=5)
+            label = str(full)
+            text_size = draw.textsize(label, font=font, stroke_width=3)
+            draw.text((x - text_size[0] / 2, y - l * .19 - text_size[1] / 2), label, font=font, stroke_width=3, stroke_fill=(0,0,0))
+    else:
+        if(maxF <= -minAngle):
+            xm = x + math.sin(maxF) * l
+            ym = y + math.cos(maxF) * l
+            draw.line((x, y, xm, ym), fill=maxAngleFill, width=3)
+            draw.arc((x - l * 0.2, y - l * 0.2, x + l * 0.2, y + l * 0.2, ), 90, 90 + math.degrees(-maxF), fill=maxAngleFill, width=3)
+            label = format(math.degrees(maxF), '.0f') + '°'
+            text_size = draw.textsize(label, font=font, stroke_width=3)
+            draw.text((x + math.sin(maxF) * l * 1.3 - text_size[0] / 2, y + math.cos(maxF) * l * 1.3 - text_size[1] / 2), label, font=font, stroke_width=3, stroke_fill=(0,0,0))
+        if(maxB >= minAngle):
+            xm = x + math.sin(maxB) * l
+            ym = y + math.cos(maxB) * l
+            draw.line((x, y, xm, ym), fill=maxAngleFill, width=3)
+            draw.arc((x - l * 0.2, y - l * 0.2, x + l * 0.2, y + l * 0.2, ), 90 + math.degrees(-maxB), 90, fill=maxAngleFill, width=3)
+            label = format(math.degrees(maxB), '.0f') + '°'
+            text_size = draw.textsize(label, font=font, stroke_width=3)
+            draw.text((x + math.sin(maxB) * l * 1.3 - text_size[0] / 2, y + math.cos(maxB) * l * 1.3 - text_size[1] / 2), label, font=font, stroke_width=3, stroke_fill=(0,0,0))
     # swing bench
     draw.ellipse((xs - benchSize, ys - benchSize, xs + benchSize, ys + benchSize), fill=benchFill, width = 3)
     # fixed post
@@ -43,13 +71,13 @@ def drawSwing(draw, x, y, l, angle, aT, alpha):
     # base
     draw.rectangle((x - spindleSize, y + l - spindleSize / 2, x + spindleSize, y + l + spindleSize / 2), fill=fixedFill)
 
-def makeImage(aT, alpha, wX, angle1, angle2, framenumber):
+def makeImage(aT, alpha, wX, angle1, angle2, framenumber, maxF, maxB, full):
     gT = aT / 9.8
     img = Image.new('RGBA', (1080, 1920), (255, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.text((10,10), "gT: " + format(gT, '.1f') + 'g α1: ' + format(math.degrees(angle1), '.1f') + '° α2: ' + format(math.degrees(angle2), '.1f') + '° ω: ' + format(wX, '.2f') +'°/s', font=font, stroke_width=5, stroke_fill=(0,0,0))
+    draw.text((10,10), format(gT, '.1f') + 'g α:' + format(math.degrees(angle1), '.1f') + '° ω:' + format(wX, '.0f') +'°/s', font=font, stroke_width=5, stroke_fill=(0,0,0))
     #print("angle: " + str(angle) + " X:" + str(math.sin(angle)) + " Y: " + str(math.cos(angle)))
-    drawSwing(draw, 800, 200, 200, angle1, gT, alpha)
+    drawSwing(draw, 750, 300, 200, angle1, gT, alpha, maxF, maxB, full)
     #drawSwing(draw, 800, 600, 200, angle2, gT, alpha)
     img.save('png/' + format(framenumber, '05d') + '.png', 'PNG')
     print("*** Written frame " + str(framenumber))
@@ -60,7 +88,6 @@ def normalize_angle_rad(angle):
     elif(angle < -math.pi):
         return angle + 2 * math.pi
     return angle
-
 
 with open(sys.argv[1]) as csvfile:
     column_names = ["ax", "ay", "az", "wx", "wy", "wz", "ts", "datetime"]
@@ -86,8 +113,16 @@ with open(sys.argv[1]) as csvfile:
         dWx = math.radians(wX) * (current_time - old_time)
         angle_W_openloop -= dWx
         angle_W_a_compensated -= dWx
+        if(angle_W_a_compensated > math.pi or angle_W_a_compensated < -math.pi):
+            # full turn succeeded!
+            fullTurns += 1
+            print("fullturn")
         angle_W_openloop = normalize_angle_rad(angle_W_openloop)
         angle_W_a_compensated = normalize_angle_rad(angle_W_a_compensated)
+        if(angle_W_a_compensated < maxAngleF):
+            maxAngleF = angle_W_a_compensated
+        elif(angle_W_a_compensated > maxAngleB):
+            maxAngleB = angle_W_a_compensated
         old_time = current_time
         # aT
         ax = float(row['ax'])
@@ -116,8 +151,11 @@ with open(sys.argv[1]) as csvfile:
                     inertial_count += 1
                     if(inertial_count >= 10):
                         print("################################################## sync ##################################################")
-                        print("   alpha: " + format(math.degrees(alpha), '.1f') + " old angle: " + format(math.degrees(angle_W_a_compensated), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_a_compensated), '.1f') + " w: " + format(math.degrees(angle_W_openloop), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_openloop), '.1f'))
+                        #print("   alpha: " + format(math.degrees(alpha), '.1f') + " old angle: " + format(math.degrees(angle_W_a_compensated), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_a_compensated), '.1f') + " w: " + format(math.degrees(angle_W_openloop), '.1f') + " diff: " + format(math.degrees(alpha - angle_W_openloop), '.1f'))
                         angle_W_a_compensated = alpha
+                        maxAngleF = 0.0
+                        maxAngleB = 0.0
+                        fullTurns = 0
                 else:
                     inertial_count = 0
                 axsum = 0.0
@@ -127,7 +165,8 @@ with open(sys.argv[1]) as csvfile:
             else: # frame time has passed but there is no data, likely a "hole" in the sensor capture - let's use old data unchanged
                 print("** ** ** FRAME NO DATA!")
             
-            #makeImage(aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter)
-            executor.submit(makeImage, aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter)
+            print("maxF: " + str(math.degrees(maxAngleF)), " maxB: ", str(math.degrees(maxAngleB)))
+            #makeImage(aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter, maxAngleF, maxAngleB)
+            executor.submit(makeImage, aT, alpha, wX, angle_W_a_compensated, angle_W_openloop, frameCounter, maxAngleF, maxAngleB, fullTurns)
             frameCounter += 1
             time_end_frame += step
